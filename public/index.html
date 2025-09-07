@@ -76,8 +76,8 @@
       import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
       // ======== Configuration ========
-      const FUNCTION_URL = "https://YOUR-REGION-YOUR-PROJECT.cloudfunctions.net/replicateProxy"; // Replace with your deployed function URL
-      const TRIPOSR_VERSION = "stabilityai/triposr:v2.2.0"; // As requested
+      const FUNCTION_URL = "https://replicateproxy-vxwaz7jsia-uc.a.run.app"; // Replace with your deployed function URL
+      const TRIPOSR_VERSION = "camenduru/tripo-sr:e0d3fe8abce3ba86497ea3530d9eae59af7b2231b6c82bedfc32b0732d35ec3a"; // As requested
 
       // ======== DOM ========
       const imageInput = document.getElementById('image-input');
@@ -219,27 +219,7 @@
         });
       }
 
-      async function startPredictionViaProxy(imageDataUrl) {
-        const body = {
-          image: imageDataUrl,
-          version: TRIPOSR_VERSION,
-          format: 'glb',
-        };
-
-        const res = await fetch(FUNCTION_URL, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(body),
-        });
-
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`Proxy call failed: ${res.status} ${text}`);
-        }
-        return res.json();
-      }
+      // Removed inlined helper to show detailed logging directly where called
 
       async function pollPrediction(getUrl, onUpdate) {
         while (true) {
@@ -293,9 +273,42 @@
           clearCurrentModel();
 
           const imageDataUrl = await readFileAsDataURL(file);
+          const cleanBase64 = String(imageDataUrl).split(',')[1];
           setStatus('Generating model (this can take a minute)...');
 
-          const pred = await startPredictionViaProxy(imageDataUrl);
+          // Debug-friendly direct proxy call with detailed logs
+          const proxyUrl = FUNCTION_URL; // Ensure this is set to your function URL
+          const bodyPayload = {
+            imageBase64: cleanBase64,
+          };
+
+          console.log('FRONTEND LOG: Preparing to call the proxy function at:', proxyUrl);
+          console.log('FRONTEND LOG: Sending this payload:', JSON.stringify(bodyPayload, null, 2));
+
+          const pred = await fetch(proxyUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(bodyPayload),
+          })
+            .then((response) => {
+              console.log('FRONTEND LOG: Received response from proxy.', response);
+              if (!response.ok) {
+                throw new Error(`Network response was not ok, status: ${response.status}`);
+              }
+              return response.json();
+            })
+            .then((data) => {
+              console.log('FRONTEND LOG: Successfully got data from proxy:', data);
+              return data;
+            })
+            .catch((error) => {
+              console.error('FRONTEND LOG: A critical error occurred during the fetch call:', error);
+              setStatus(`Error: ${error.message}. Check the browser console for details.`);
+              throw error;
+            });
+
           const final = await pollPrediction(pred?.urls?.get, (update) => {
             const { status, metrics } = update || {};
             modelMeta.textContent = status ? `status: ${status}` : '';
