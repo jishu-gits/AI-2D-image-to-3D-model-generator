@@ -76,7 +76,7 @@
       import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
       // ======== Configuration ========
-      const REPLICATE_API_TOKEN = "";
+      const FUNCTION_URL = "https://YOUR-REGION-YOUR-PROJECT.cloudfunctions.net/replicateProxy"; // Replace with your deployed function URL
       const TRIPOSR_VERSION = "stabilityai/triposr:v2.2.0"; // As requested
 
       // ======== DOM ========
@@ -209,67 +209,41 @@
         });
       }
 
-      // ======== Replicate API helpers ========
-      function assertToken() {
-        if (!REPLICATE_API_TOKEN || REPLICATE_API_TOKEN.includes('PASTE_YOUR_REPLICATE_API_TOKEN_HERE')) {
-          throw new Error('Please set your Replicate API token in the source code.');
-        }
-      }
-
-      async function uploadFileToReplicate(file) {
-        const form = new FormData();
-        form.append('file', file);
-
-        const res = await fetch('https://api.replicate.com/v1/files', {
-          method: 'POST',
-          headers: {
-            Authorization: `Token ${REPLICATE_API_TOKEN}`,
-          },
-          body: form,
+      // ======== Backend proxy helpers ========
+      function readFileAsDataURL(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
         });
-
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(`Upload failed: ${res.status} ${text}`);
-        }
-        const data = await res.json();
-        // data.url is a temporary URL we can pass into predictions
-        return data?.url;
       }
 
-      async function startPrediction(imageUrl) {
+      async function startPredictionViaProxy(imageDataUrl) {
         const body = {
+          image: imageDataUrl,
           version: TRIPOSR_VERSION,
-          input: {
-            image: imageUrl,
-            format: 'glb',
-          },
+          format: 'glb',
         };
 
-        const res = await fetch('https://api.replicate.com/v1/predictions', {
+        const res = await fetch(FUNCTION_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Token ${REPLICATE_API_TOKEN}`,
           },
           body: JSON.stringify(body),
         });
 
         if (!res.ok) {
           const text = await res.text();
-          throw new Error(`Prediction start failed: ${res.status} ${text}`);
+          throw new Error(`Proxy call failed: ${res.status} ${text}`);
         }
-        const data = await res.json();
-        return data; // Contains urls.get to poll
+        return res.json();
       }
 
       async function pollPrediction(getUrl, onUpdate) {
         while (true) {
-          const res = await fetch(getUrl, {
-            headers: {
-              Authorization: `Token ${REPLICATE_API_TOKEN}`,
-            },
-          });
+          const res = await fetch(getUrl);
           if (!res.ok) {
             const text = await res.text();
             throw new Error(`Polling failed: ${res.status} ${text}`);
@@ -303,12 +277,6 @@
 
       // ======== Generate flow ========
       generateBtn.addEventListener('click', async () => {
-        try {
-          assertToken();
-        } catch (e) {
-          setStatus(e.message);
-          return;
-        }
 
         if (!imageInput.files || imageInput.files.length === 0) {
           setStatus('Please choose an image first.');
@@ -324,10 +292,10 @@
           initScene();
           clearCurrentModel();
 
-          const imageUrl = await uploadFileToReplicate(file);
+          const imageDataUrl = await readFileAsDataURL(file);
           setStatus('Generating model (this can take a minute)...');
 
-          const pred = await startPrediction(imageUrl);
+          const pred = await startPredictionViaProxy(imageDataUrl);
           const final = await pollPrediction(pred?.urls?.get, (update) => {
             const { status, metrics } = update || {};
             modelMeta.textContent = status ? `status: ${status}` : '';
