@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI 2D → 3D Model Generator</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <meta name="color-scheme" content="dark" />
+  </head>
+  <body class="min-h-screen bg-zinc-950 text-zinc-100">
+    <div class="mx-auto max-w-6xl px-4 py-8">
+      <header class="mb-6 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
+        <h1 class="text-2xl font-semibold tracking-tight text-white">AI 2D → 3D Model Generator</h1>
+        <a
+          href="https://replicate.com/"
+          target="_blank"
+          rel="noreferrer"
+          class="text-sm text-zinc-400 hover:text-zinc-200"
+        >Powered by Replicate + Three.js</a>
+      </header>
+
+      <main class="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        <section class="lg:col-span-4">
+          <div class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+            <label class="mb-2 block text-sm font-medium text-zinc-300" for="image-input">Input image</label>
+            <input
+              id="image-input"
+              type="file"
+              accept="image/*"
+              class="mb-4 block w-full cursor-pointer rounded-lg border border-zinc-800 bg-zinc-950/60 px-4 py-2 text-sm text-zinc-300 file:mr-4 file:cursor-pointer file:rounded-md file:border-0 file:bg-zinc-800 file:px-3 file:py-2 file:text-zinc-100 hover:file:bg-zinc-700"
+            />
+
+            <button
+              id="generate-btn"
+              class="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Generate
+            </button>
+
+            <div class="mt-4">
+              <label class="mb-2 block text-sm font-medium text-zinc-300" for="status">Status</label>
+              <textarea
+                id="status"
+                class="h-40 w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none"
+                placeholder="Idle."
+                readonly
+              ></textarea>
+            </div>
+          </div>
+        </section>
+
+        <section class="lg:col-span-8">
+          <div class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
+            <div class="mb-3 flex items-center justify-between">
+              <h2 class="text-sm font-medium text-zinc-300">3D Preview</h2>
+              <div id="model-meta" class="text-xs text-zinc-500"></div>
+            </div>
+            <div id="container" class="h-[540px] w-full rounded-lg bg-zinc-950"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module">
+      // External modules
+      import * as THREE from 'https://unpkg.com/three@0.156.1/build/three.module.js';
+      import { OrbitControls } from 'https://unpkg.com/three@0.156.1/examples/jsm/controls/OrbitControls.js';
+      import { GLTFLoader } from 'https://unpkg.com/three@0.156.1/examples/jsm/loaders/GLTFLoader.js';
+
+      // ======== Configuration ========
+      const REPLICATE_API_TOKEN = "PASTE_YOUR_REPLICATE_API_TOKEN_HERE";
+      const TRIPOSR_VERSION = "stabilityai/triposr:v2.2.0"; // As requested
+
+      // ======== DOM ========
+      const imageInput = document.getElementById('image-input');
+      const generateBtn = document.getElementById('generate-btn');
+      const statusArea = document.getElementById('status');
+      const container = document.getElementById('container');
+      const modelMeta = document.getElementById('model-meta');
+
+      function setStatus(message) {
+        const now = new Date().toLocaleTimeString();
+        statusArea.value = `[${now}] ${message}\n` + statusArea.value;
+      }
+
+      // ======== Three.js Scene ========
+      let renderer, scene, camera, controls, currentModel;
+
+      function initScene() {
+        if (renderer) return; // Initialize once
+
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color('#09090b');
+
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+
+        camera = new THREE.PerspectiveCamera(50, width / height, 0.01, 1000);
+        camera.position.set(0.8, 0.6, 1.2);
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.setSize(width, height);
+        container.appendChild(renderer.domElement);
+
+        // Lights
+        const ambient = new THREE.AmbientLight(0xffffff, 1.2);
+        scene.add(ambient);
+
+        const dirLight1 = new THREE.DirectionalLight(0xffffff, 1.2);
+        dirLight1.position.set(3, 5, 2);
+        scene.add(dirLight1);
+
+        const dirLight2 = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight2.position.set(-3, 2, -2);
+        scene.add(dirLight2);
+
+        // Controls
+        controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.enablePan = true;
+        controls.target.set(0, 0.35, 0);
+
+        // Resize
+        window.addEventListener('resize', onWindowResize);
+
+        // Render loop
+        const animate = () => {
+          requestAnimationFrame(animate);
+          controls.update();
+          renderer.render(scene, camera);
+        };
+        animate();
+      }
+
+      function onWindowResize() {
+        if (!renderer || !camera) return;
+        const width = container.clientWidth;
+        const height = container.clientHeight;
+        camera.aspect = width / height;
+        camera.updateProjectionMatrix();
+        renderer.setSize(width, height);
+      }
+
+      function clearCurrentModel() {
+        if (!currentModel) return;
+        scene.remove(currentModel);
+        currentModel.traverse?.((child) => {
+          if (child.isMesh) {
+            child.geometry?.dispose?.();
+            if (child.material) {
+              const materials = Array.isArray(child.material)
+                ? child.material
+                : [child.material];
+              materials.forEach((m) => {
+                m.map?.dispose?.();
+                m.normalMap?.dispose?.();
+                m.roughnessMap?.dispose?.();
+                m.metalnessMap?.dispose?.();
+                m.displacementMap?.dispose?.();
+                m.envMap?.dispose?.();
+                m.dispose?.();
+              });
+            }
+          }
+        });
+        currentModel = undefined;
+      }
+
+      function fitCameraToObject(object3D) {
+        const box = new THREE.Box3().setFromObject(object3D);
+        const size = new THREE.Vector3();
+        const center = new THREE.Vector3();
+        box.getSize(size);
+        box.getCenter(center);
+
+        // Re-center model
+        object3D.position.sub(center);
+        controls.target.copy(new THREE.Vector3(0, 0, 0));
+        controls.update();
+
+        // Distance so object fits the view
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const fov = camera.fov * (Math.PI / 180);
+        let cameraZ = Math.abs(maxDim / (2 * Math.tan(fov / 2)));
+        cameraZ *= 1.5; // Padding
+        camera.position.set(cameraZ, cameraZ * 0.75, cameraZ);
+        camera.lookAt(0, 0, 0);
+      }
+
+      async function loadGLB(url) {
+        return new Promise((resolve, reject) => {
+          const loader = new GLTFLoader();
+          loader.load(
+            url,
+            (gltf) => resolve(gltf.scene || gltf.scenes?.[0]),
+            undefined,
+            (err) => reject(err)
+          );
+        });
+      }
+
+      // ======== Replicate API helpers ========
+      function assertToken() {
+        if (!REPLICATE_API_TOKEN || REPLICATE_API_TOKEN.includes('PASTE_YOUR_REPLICATE_API_TOKEN_HERE')) {
+          throw new Error('Please set your Replicate API token in the source code.');
+        }
+      }
+
+      async function uploadFileToReplicate(file) {
+        const form = new FormData();
+        form.append('file', file);
+
+        const res = await fetch('https://api.replicate.com/v1/files', {
+          method: 'POST',
+          headers: {
+            Authorization: `Token ${REPLICATE_API_TOKEN}`,
+          },
+          body: form,
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`Upload failed: ${res.status} ${text}`);
+        }
+        const data = await res.json();
+        // data.url is a temporary URL we can pass into predictions
+        return data?.url;
+      }
+
+      async function startPrediction(imageUrl) {
+        const body = {
+          version: TRIPOSR_VERSION,
+          input: {
+            image: imageUrl,
+            format: 'glb',
+          },
+        };
+
+        const res = await fetch('https://api.replicate.com/v1/predictions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Token ${REPLICATE_API_TOKEN}`,
+          },
+          body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`Prediction start failed: ${res.status} ${text}`);
+        }
+        const data = await res.json();
+        return data; // Contains urls.get to poll
+      }
+
+      async function pollPrediction(getUrl, onUpdate) {
+        while (true) {
+          const res = await fetch(getUrl, {
+            headers: {
+              Authorization: `Token ${REPLICATE_API_TOKEN}`,
+            },
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`Polling failed: ${res.status} ${text}`);
+          }
+          const data = await res.json();
+          onUpdate?.(data);
+
+          if (data.status === 'succeeded') return data;
+          if (data.status === 'failed' || data.status === 'canceled') {
+            throw new Error(`Prediction ${data.status}`);
+          }
+          await new Promise((r) => setTimeout(r, 3000));
+        }
+      }
+
+      function extractGlbUrlFromOutput(output) {
+        if (!output) return undefined;
+        if (typeof output === 'string') return output;
+        if (Array.isArray(output)) {
+          const glb = output.find((u) => typeof u === 'string' && u.endsWith('.glb'));
+          return glb || output[0];
+        }
+        if (typeof output === 'object') {
+          // Some models return an object with URLs
+          const values = Object.values(output).filter((v) => typeof v === 'string');
+          const glb = values.find((u) => u.endsWith('.glb'));
+          return glb || values[0];
+        }
+        return undefined;
+      }
+
+      // ======== Generate flow ========
+      generateBtn.addEventListener('click', async () => {
+        try {
+          assertToken();
+        } catch (e) {
+          setStatus(e.message);
+          return;
+        }
+
+        if (!imageInput.files || imageInput.files.length === 0) {
+          setStatus('Please choose an image first.');
+          return;
+        }
+
+        const file = imageInput.files[0];
+
+        generateBtn.disabled = true;
+        setStatus('Uploading...');
+
+        try {
+          initScene();
+          clearCurrentModel();
+
+          const imageUrl = await uploadFileToReplicate(file);
+          setStatus('Generating model (this can take a minute)...');
+
+          const pred = await startPrediction(imageUrl);
+          const final = await pollPrediction(pred?.urls?.get, (update) => {
+            const { status, metrics } = update || {};
+            modelMeta.textContent = status ? `status: ${status}` : '';
+          });
+
+          setStatus('Fetching model...');
+          const glbUrl = extractGlbUrlFromOutput(final?.output);
+          if (!glbUrl) {
+            throw new Error('No GLB URL found in prediction output.');
+          }
+
+          const model = await loadGLB(glbUrl);
+          scene.add(model);
+          currentModel = model;
+          fitCameraToObject(model);
+          setStatus('Done!');
+          modelMeta.textContent = 'status: succeeded';
+        } catch (err) {
+          console.error(err);
+          setStatus(`Error: ${err?.message || err}`);
+        } finally {
+          generateBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+  </html>
+
+
+
